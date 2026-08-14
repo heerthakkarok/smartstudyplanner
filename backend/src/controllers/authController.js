@@ -28,25 +28,16 @@ const validatePasswordStrict = (password) => {
 // @access  Public
 const registerUser = async (req, res) => {
   try {
-    const { name, email, password } = req.body || {};
-
-    if (!name || !email || !password) {
-      return res.status(400).json({ success: false, message: 'Please provide all required fields (name, email, and password).' });
+    const { isValid, error, data } = validateInput(registerSchema, req.body);
+    if (!isValid) {
+      return res.status(400).json({ success: false, message: error });
     }
 
-    if (typeof email !== 'string' || typeof password !== 'string') {
-      return res.status(400).json({ success: false, message: 'Invalid input format.' });
-    }
-
-    const cleanEmail = email.trim().toLowerCase();
-
-    console.log("REGISTER REQUEST:", {
-      name: name.trim(),
-      email: cleanEmail,
-      hasPassword: Boolean(password),
-    });
+    const { name, email, password } = data;
+    const cleanEmail = email.toLowerCase().trim();
 
     if (!validatePasswordStrict(password)) {
+
       return res.status(400).json({
         success: false,
         message:
@@ -64,9 +55,9 @@ const registerUser = async (req, res) => {
 
     // Create user directly (isEmailVerified: true, NO OTP)
     const user = await User.create({
-      name: name.trim(),
+      name,
       email: cleanEmail,
-      password, // Mongoose pre-save hook hashes with bcrypt
+      password,
       authProvider: 'local',
       isEmailVerified: true,
       isOnboarded: false,
@@ -87,7 +78,7 @@ const registerUser = async (req, res) => {
       },
     });
   } catch (error) {
-    console.error('REGISTER ERROR:', error);
+    console.error('Register Error:', error);
     return res.status(500).json({ success: false, message: error.message || 'Server error during registration' });
   }
 };
@@ -97,62 +88,37 @@ const registerUser = async (req, res) => {
 // @access  Public
 const loginUser = async (req, res) => {
   try {
-    const { email, password } = req.body || {};
-
-    if (!email) {
-      return res.status(400).json({ success: false, message: 'Please enter your email address' });
+    const { isValid, error, data } = validateInput(loginSchema, req.body);
+    if (!isValid) {
+      return res.status(400).json({ success: false, message: error });
     }
 
-    if (!password) {
-      return res.status(400).json({ success: false, message: 'Please enter your password' });
-    }
-
-    if (typeof email !== 'string' || typeof password !== 'string') {
-      return res.status(400).json({ success: false, message: 'Invalid input format for email or password' });
-    }
-
-    const cleanEmail = email.trim().toLowerCase();
-
-    console.log("LOGIN EMAIL:", cleanEmail);
-    console.log("EMAIL TYPE:", typeof cleanEmail);
+    const { email, password } = data;
+    const cleanEmail = email.toLowerCase().trim();
 
     const user = await User.findOne({ email: cleanEmail });
 
-    console.log("USER FOUND:", Boolean(user));
-    console.log("PASSWORD HASH EXISTS:", Boolean(user?.password));
-
     if (!user) {
-      return res.status(401).json({ success: false, message: 'Invalid email or password' });
+      return res.status(404).json({ success: false, message: 'Account not found. Please create an account.' });
     }
 
-    if (user.authProvider === 'google' && !user.password) {
-      return res.status(400).json({
-        success: false,
-        message: 'This account uses Google Sign-In. Please continue with Google.',
+    if (await user.matchPassword(password)) {
+      const token = generateToken(user._id);
+      return res.json({
+        success: true,
+        token,
+        user: {
+          _id: user._id,
+          name: user.name,
+          email: user.email,
+          dailyStudyHours: user.dailyStudyHours,
+          preferredStudyTimes: user.preferredStudyTimes || ['evening'],
+          isOnboarded: user.isOnboarded,
+        },
       });
+    } else {
+      return res.status(401).json({ success: false, message: 'Incorrect email or password.' });
     }
-
-    const isMatch = await user.matchPassword(password);
-    console.log("PASSWORD MATCH:", isMatch);
-
-    if (!isMatch) {
-      return res.status(401).json({ success: false, message: 'Invalid email or password' });
-    }
-
-    const token = generateToken(user._id);
-
-    return res.json({
-      success: true,
-      token,
-      user: {
-        _id: user._id,
-        name: user.name,
-        email: user.email,
-        dailyStudyHours: user.dailyStudyHours,
-        preferredStudyTimes: user.preferredStudyTimes || ['evening'],
-        isOnboarded: user.isOnboarded,
-      },
-    });
   } catch (error) {
     console.error('Login Error:', error);
     return res.status(500).json({ success: false, message: error.message || 'Server error during login' });
@@ -331,14 +297,13 @@ const googleLogin = async (req, res) => {
 // @access  Public
 const forgotPassword = async (req, res) => {
   try {
-    const { email } = req.body || {};
-    if (!email) {
-      return res.status(400).json({ success: false, message: 'Please enter your email address' });
+    const { isValid, error, data } = validateInput(forgotPasswordSchema, req.body);
+    if (!isValid) {
+      return res.status(400).json({ success: false, message: error });
     }
 
-    const cleanEmail = email.toString().trim().toLowerCase();
-
-    console.log("FORGOT PASSWORD EMAIL:", cleanEmail);
+    const { email } = data;
+    const cleanEmail = email.toLowerCase().trim();
 
     const user = await User.findOne({ email: cleanEmail });
     if (!user) {
@@ -359,15 +324,12 @@ const forgotPassword = async (req, res) => {
     await user.save();
 
     try {
-      const result = await sendResetCodeEmail(cleanEmail, user.name, resetCode);
-      if (!result) {
-        throw new Error('Reset email was not sent');
-      }
+      await sendResetCodeEmail(cleanEmail, user.name, resetCode);
     } catch (mailError) {
-      console.error('FORGOT PASSWORD EMAIL ERROR:', mailError.message || mailError);
+      console.error('Failed to send reset code email via Nodemailer:', mailError);
       return res.status(500).json({
         success: false,
-        message: 'Unable to send verification code. Please try again.',
+        message: 'Unable to send password reset email. Please try again.',
       });
     }
 
