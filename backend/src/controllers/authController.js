@@ -99,13 +99,22 @@ const loginUser = async (req, res) => {
   try {
     const { email, password } = req.body || {};
 
-    if (!email || !password) {
-      return res.status(400).json({ success: false, message: 'Please enter your email and password' });
+    if (!email) {
+      return res.status(400).json({ success: false, message: 'Please enter your email address' });
     }
 
-    const cleanEmail = email.toString().trim().toLowerCase();
+    if (!password) {
+      return res.status(400).json({ success: false, message: 'Please enter your password' });
+    }
+
+    if (typeof email !== 'string' || typeof password !== 'string') {
+      return res.status(400).json({ success: false, message: 'Invalid input format for email or password' });
+    }
+
+    const cleanEmail = email.trim().toLowerCase();
 
     console.log("LOGIN EMAIL:", cleanEmail);
+    console.log("EMAIL TYPE:", typeof cleanEmail);
 
     const user = await User.findOne({ email: cleanEmail });
 

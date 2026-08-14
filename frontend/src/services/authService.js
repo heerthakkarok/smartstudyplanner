@@ -12,9 +12,11 @@ export const registerUser = async (userData) => {
 };
 
 export const loginUser = async (credentials) => {
+  const emailVal = credentials?.email;
+  console.log("LOGIN REQUEST EMAIL TYPE:", typeof emailVal);
   console.log("LOGIN PAYLOAD:", {
-    email: credentials?.email,
-    emailType: typeof credentials?.email,
+    email: emailVal,
+    emailType: typeof emailVal,
     hasPassword: Boolean(credentials?.password)
   });
   const response = await API.post('/auth/login', credentials);

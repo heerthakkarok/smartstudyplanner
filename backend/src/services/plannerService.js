@@ -74,7 +74,7 @@ const validateTimetable = (scheduledTasks, dailyLimit) => {
     let dayTotalMins = 0;
     for (let i = 0; i < dayTasks.length; i++) {
       const taskStart = timeToMinutes(dayTasks[i].startTime);
-      const taskDurationMins = (dayTasks[i].duration || 1) * 60;
+      const taskDurationMins = Math.round((dayTasks[i].duration || 1) * 60);
       const taskEnd = taskStart + taskDurationMins;
 
       dayTotalMins += taskDurationMins;
@@ -90,7 +90,7 @@ const validateTimetable = (scheduledTasks, dailyLimit) => {
       }
     }
 
-    if (dayTotalMins > dailyLimit * 60) {
+    if (dayTotalMins > Math.round(dailyLimit * 60) + 1) {
       throw new Error(`Daily limit exceeded on ${dStr}: Scheduled ${dayTotalMins / 60}h exceeds limit of ${dailyLimit}h.`);
     }
   }
@@ -98,7 +98,7 @@ const validateTimetable = (scheduledTasks, dailyLimit) => {
   return true;
 };
 
-// Non-Overlapping Scheduling Engine
+// Adaptive Non-Overlapping Chronological Scheduling Engine
 const scheduleTasksChronologically = (taskItems, dailyLimit, prefWindows, startDate) => {
   const scheduledTasks = [];
   let currentDayOffset = 0;
@@ -107,47 +107,75 @@ const scheduleTasksChronologically = (taskItems, dailyLimit, prefWindows, startD
   let currentPointerMins = prefWindows[0].start;
 
   for (const item of taskItems) {
-    const itemMins = (item.duration || 1) * 60;
+    let durationToSchedule = item.duration;
 
-    // Check if daily limit exceeded or window overflow
-    if (
-      dayHoursScheduled + item.duration > dailyLimit ||
-      currentPointerMins + itemMins > prefWindows[currentWindowIdx].end
-    ) {
-      // Try next window on same day if available
-      if (currentWindowIdx < prefWindows.length - 1) {
-        currentWindowIdx++;
-        currentPointerMins = Math.max(currentPointerMins, prefWindows[currentWindowIdx].start);
-      } else {
-        // Move to next day
+    while (durationToSchedule > 0.001) {
+      const remainingDailyCapacity = dailyLimit - dayHoursScheduled;
+
+      if (remainingDailyCapacity <= 0.001) {
         currentDayOffset++;
         dayHoursScheduled = 0;
         currentWindowIdx = 0;
         currentPointerMins = prefWindows[0].start;
+        continue;
       }
+
+      const currentWin = prefWindows[currentWindowIdx];
+      const remainingWindowMins = currentWin.end - currentPointerMins;
+
+      if (remainingWindowMins <= 0) {
+        if (currentWindowIdx < prefWindows.length - 1) {
+          currentWindowIdx++;
+          currentPointerMins = Math.max(currentPointerMins, prefWindows[currentWindowIdx].start);
+        } else {
+          currentDayOffset++;
+          dayHoursScheduled = 0;
+          currentWindowIdx = 0;
+          currentPointerMins = prefWindows[0].start;
+        }
+        continue;
+      }
+
+      const maxSliceHours = Math.min(
+        durationToSchedule,
+        remainingDailyCapacity,
+        remainingWindowMins / 60
+      );
+
+      const chunkDuration = Number(maxSliceHours.toFixed(2));
+      const chunkMins = Math.round(chunkDuration * 60);
+
+      if (chunkDuration <= 0 || chunkMins <= 0) {
+        if (currentWindowIdx < prefWindows.length - 1) {
+          currentWindowIdx++;
+          currentPointerMins = Math.max(currentPointerMins, prefWindows[currentWindowIdx].start);
+        } else {
+          currentDayOffset++;
+          dayHoursScheduled = 0;
+          currentWindowIdx = 0;
+          currentPointerMins = prefWindows[0].start;
+        }
+        continue;
+      }
+
+      const taskDate = new Date(startDate);
+      taskDate.setDate(startDate.getDate() + currentDayOffset);
+      const startTimeStr = minutesToTimeStr(currentPointerMins);
+
+      scheduledTasks.push({
+        subjectId: item.subjectId,
+        topicId: item.topicId,
+        date: taskDate,
+        startTime: startTimeStr,
+        duration: chunkDuration,
+        priority: item.priority,
+        status: 'pending',
+      });
+
+      dayHoursScheduled += chunkDuration;
+      currentPointerMins += chunkMins;
+      durationToSchedule -= chunkDuration;
     }
-
-    // Double check window fit after day/window shift
-    if (currentPointerMins + itemMins > prefWindows[currentWindowIdx].end) {
-      currentPointerMins = prefWindows[currentWindowIdx].start;
-    }
-
-    const taskDate = new Date(startDate);
-    taskDate.setDate(startDate.getDate() + currentDayOffset);
-    const startTimeStr = minutesToTimeStr(currentPointerMins);
-
-    scheduledTasks.push({
-      subjectId: item.subjectId,
-      topicId: item.topicId,
-      date: taskDate,
-      startTime: startTimeStr,
-      duration: item.duration,
-      priority: item.priority,
-      status: 'pending',
-    });
-
-    dayHoursScheduled += item.duration;
-    currentPointerMins += itemMins; // NO OVERLAP! Next task starts after previous ends.
   }
 
   return scheduledTasks;
@@ -161,12 +189,21 @@ const generateStudyPlanAlgorithm = async (userId, examId) => {
     throw new Error('Exam not found');
   }
 
-  const dailyLimit = exam.dailyStudyHours || user.dailyStudyHours || 4;
-  const preferredTimes = exam.preferredStudyTimes?.length > 0
-    ? exam.preferredStudyTimes
-    : user.preferredStudyTimes?.length > 0
+  // 1. Fetch user's latest daily limit and preferred study times (Source of Truth)
+  const dailyLimit = Number(user.dailyStudyHours) || Number(exam.dailyStudyHours) || 4;
+  const preferredTimes = (user.preferredStudyTimes?.length > 0
     ? user.preferredStudyTimes
-    : ['evening'];
+    : exam.preferredStudyTimes?.length > 0
+    ? exam.preferredStudyTimes
+    : ['evening']);
+
+  // Sync active Exam model with latest user profile settings
+  if (exam.dailyStudyHours !== dailyLimit || JSON.stringify(exam.preferredStudyTimes) !== JSON.stringify(preferredTimes)) {
+    exam.dailyStudyHours = dailyLimit;
+    exam.preferredStudyTimes = preferredTimes;
+    await exam.save();
+  }
+
   const prefWindows = getPreferenceMinuteWindows(preferredTimes);
 
   const subjects = await Subject.find({ examId: exam._id, userId });
@@ -218,29 +255,39 @@ const generateStudyPlanAlgorithm = async (userId, examId) => {
 
   processedTopics.sort((a, b) => b.weightedScore - a.weightedScore);
 
+  // 2. Chunk topics into manageable task items (constrained by dailyLimit)
+  const maxChunkSize = Math.min(dailyLimit, 2);
   const taskItems = [];
   processedTopics.forEach((item) => {
     let hoursRemaining = item.estimatedHours;
     while (hoursRemaining > 0) {
-      const duration = hoursRemaining >= 2 ? 2 : hoursRemaining;
+      const duration = Math.min(hoursRemaining, maxChunkSize);
       taskItems.push({
         subjectId: item.subjectId,
         topicId: item.topicId,
-        duration,
+        duration: Number(duration.toFixed(2)),
         priority: item.priority,
       });
       hoursRemaining -= duration;
     }
   });
 
+  const totalRemainingWorkload = taskItems.reduce((sum, t) => sum + t.duration, 0);
+  console.log("CURRENT DAILY STUDY LIMIT:", dailyLimit);
+  console.log("TOTAL REMAINING WORKLOAD:", totalRemainingWorkload);
+
+  // 3. Clear only uncompleted/pending generated schedule
   await StudyTask.deleteMany({ examId: exam._id, userId, status: 'pending' });
 
+  // 4. Chronological non-overlapping schedule generation
   const scheduledTasks = scheduleTasksChronologically(taskItems, dailyLimit, prefWindows, today);
   
+  console.log("GENERATED SESSIONS:", scheduledTasks.length);
+
   // Attach userId and examId
   const finalTasks = scheduledTasks.map((t) => ({ ...t, userId, examId: exam._id }));
 
-  // Validate Timetable for zero overlaps
+  // Validate Timetable for zero overlaps & daily limit compliance
   validateTimetable(finalTasks, dailyLimit);
 
   const createdTasks = await StudyTask.insertMany(finalTasks);
@@ -261,12 +308,21 @@ const adaptStudyPlanAlgorithm = async (userId, examId) => {
     throw new Error('Exam not found');
   }
 
-  const dailyLimit = exam.dailyStudyHours || user.dailyStudyHours || 4;
-  const preferredTimes = exam.preferredStudyTimes?.length > 0
-    ? exam.preferredStudyTimes
-    : user.preferredStudyTimes?.length > 0
+  // 1. Fetch user's latest daily limit and preferred study times (Source of Truth)
+  const dailyLimit = Number(user.dailyStudyHours) || Number(exam.dailyStudyHours) || 4;
+  const preferredTimes = (user.preferredStudyTimes?.length > 0
     ? user.preferredStudyTimes
-    : ['evening'];
+    : exam.preferredStudyTimes?.length > 0
+    ? exam.preferredStudyTimes
+    : ['evening']);
+
+  // Sync active Exam model with latest user profile settings
+  if (exam.dailyStudyHours !== dailyLimit || JSON.stringify(exam.preferredStudyTimes) !== JSON.stringify(preferredTimes)) {
+    exam.dailyStudyHours = dailyLimit;
+    exam.preferredStudyTimes = preferredTimes;
+    await exam.save();
+  }
+
   const prefWindows = getPreferenceMinuteWindows(preferredTimes);
 
   const oldTasksRaw = await StudyTask.find({ userId, examId: exam._id })
@@ -334,7 +390,7 @@ const adaptStudyPlanAlgorithm = async (userId, examId) => {
       (t) => t.topicId?._id?.toString() === topic._id.toString() && t.status === 'completed'
     );
     const completedHours = completedTopicTasks.reduce((sum, t) => sum + (t.duration || 0), 0);
-    const neededHours = Math.max((topic.estimatedHours || 2) + extraHours - completedHours, 1);
+    const neededHours = Math.max((topic.estimatedHours || 2) + extraHours - completedHours, 0.5);
 
     let priority = 'medium';
     if (weightedScore >= 5 || topic.difficulty === 'hard' || quizAvgAccuracy < 60) {
@@ -356,23 +412,30 @@ const adaptStudyPlanAlgorithm = async (userId, examId) => {
 
   processedTopics.sort((a, b) => b.weightedScore - a.weightedScore);
 
+  // Chunk topic remaining needed hours according to dailyLimit constraint
+  const maxChunkSize = Math.min(dailyLimit, 2);
   const taskItems = [];
   processedTopics.forEach((item) => {
     let hoursRemaining = item.neededHours;
     while (hoursRemaining > 0) {
-      const duration = hoursRemaining >= 2 ? 2 : hoursRemaining;
+      const duration = Math.min(hoursRemaining, maxChunkSize);
       taskItems.push({
         subjectId: item.subjectId,
         topicId: item.topicId,
         subjectName: item.subjectName,
         topicName: item.topicName,
-        duration,
+        duration: Number(duration.toFixed(2)),
         priority: item.priority,
       });
       hoursRemaining -= duration;
     }
   });
 
+  const totalRemainingWorkload = taskItems.reduce((sum, t) => sum + t.duration, 0);
+  console.log("ADAPT PLAN - CURRENT DAILY STUDY LIMIT:", dailyLimit);
+  console.log("ADAPT PLAN - TOTAL REMAINING WORKLOAD:", totalRemainingWorkload);
+
+  // Clear uncompleted tasks only
   await StudyTask.deleteMany({
     examId: exam._id,
     userId,
@@ -380,6 +443,9 @@ const adaptStudyPlanAlgorithm = async (userId, examId) => {
   });
 
   const scheduledTasks = scheduleTasksChronologically(taskItems, dailyLimit, prefWindows, today);
+  
+  console.log("ADAPT PLAN - GENERATED SESSIONS:", scheduledTasks.length);
+
   const finalTasks = scheduledTasks.map((t) => ({ ...t, userId, examId: exam._id }));
 
   validateTimetable(finalTasks, dailyLimit);

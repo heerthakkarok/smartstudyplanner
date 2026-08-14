@@ -34,8 +34,13 @@ const Login = () => {
     setError('');
     setLoading(true);
 
+    const cleanEmail = typeof email === 'string' ? email.trim() : String(email || '').trim();
+
+    console.log("LOGIN FORM EMAIL:", cleanEmail);
+    console.log("LOGIN EMAIL TYPE:", typeof cleanEmail);
+
     try {
-      const data = await login(email.trim(), password);
+      const data = await login(cleanEmail, password);
       if (data.success) {
         if (!data.user.isOnboarded) {
           navigate('/onboarding');
